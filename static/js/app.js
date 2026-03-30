@@ -18,7 +18,7 @@ function getCsrfToken() {
 
 function isSafeInternalPath(url) {
   if (typeof url !== 'string') return false;
-  return url.startsWith('/') && !url.startsWith('//');
+  return url.startsWith('/') && !url.startsWith('//') && !url.includes('..');
 }
 
 window.addEventListener('DOMContentLoaded', function () {
@@ -45,11 +45,21 @@ window.addEventListener('message', function (event) {
     return;
   }
 
-  if (event.data && event.data.action === 'redirect' && isSafeInternalPath(event.data.url)) {
+  if (
+    event.data &&
+    typeof event.data === 'object' &&
+    event.data.action === 'redirect' &&
+    typeof event.data.url === 'string' &&
+    isSafeInternalPath(event.data.url)
+  ) {
     window.location.href = event.data.url;
   }
 
-  if (event.data && event.data.action === 'setMsg') {
+  if (
+    event.data &&
+    typeof event.data === 'object' &&
+    event.data.action === 'setMsg'
+  ) {
     const msgBox = document.getElementById('js-msg-box');
     if (msgBox && typeof event.data.content === 'string') {
       msgBox.textContent = event.data.content;
@@ -67,6 +77,7 @@ window.addEventListener('beforeinstallprompt', function (e) {
   if (installBtn) {
     installBtn.style.display = 'inline-block';
     installBtn.addEventListener('click', function () {
+      if (!deferredPrompt) return;
       deferredPrompt.prompt();
       deferredPrompt.userChoice.then(function (choiceResult) {
         console.log('[App] Install choice:', choiceResult.outcome);
@@ -81,5 +92,3 @@ window.socialPwaSecurity = {
   getCsrfToken,
   isSafeInternalPath,
 };
-  }
-});
