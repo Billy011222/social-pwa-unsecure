@@ -23,7 +23,8 @@
     VULNERABILITY: No CSRF token on the login form.
     A malicious site can submit a cross-origin form POST to this endpoint.
   -->
-  <form action="/" method="POST">
+<form action="/" method="POST">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="form-group">
       <label for="username">Username</label>
       <input
