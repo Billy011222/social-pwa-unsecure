@@ -1,150 +1,192 @@
-import sqlite3 as sql
-import time
-import random
 import os
+import re
+import sqlite3 as sql
+from typing import Optional
+from werkzeug.security import generate_password_hash, check_password_hash
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  user_management.py
-#  Handles all direct database operations for the Unsecure Social PWA.
-#
-#  INTENTIONAL VULNERABILITIES (for educational use):
-#    1. SQL Injection      — f-string queries throughout
-#    2. Plaintext passwords — no hashing applied at any point
-#    3. Timing side-channel — sleep only fires when username EXISTS
-#    4. No input validation — any string accepted as username/password
-#    5. IDOR-equivalent    — username passed from client-side hidden field
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Absolute paths — works regardless of where `python main.py` is called from
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH  = os.path.join(BASE_DIR, "database_files", "database.db")
-LOG_PATH = os.path.join(BASE_DIR, "visitor_log.txt")
+DB_PATH = os.path.join(BASE_DIR, 'database_files', 'database.db')
+LOG_PATH = os.path.join(BASE_DIR, 'visitor_log.txt')
+
+USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,30}$')
+DATE_RE = re.compile(r'^\d{2}/\d{2}/\d{4}$')
 
 
-def insertUser(username, password, DoB, bio=""):
-    """
-    Insert a new user.
-    VULNERABILITY: Password stored as plaintext — no bcrypt/argon2 hashing.
-    """
+def _connect():
     con = sql.connect(DB_PATH)
+    con.row_factory = sql.Row
+    return con
+
+
+def _valid_username(username: str) -> bool:
+    return bool(USERNAME_RE.fullmatch((username or '').strip()))
+
+
+def _valid_password(password: str) -> bool:
+    password = password or ''
+    return len(password) >= 8 and any(c.isalpha() for c in password) and any(c.isdigit() for c in password)
+
+
+def _valid_dob(dob: str) -> bool:
+    return bool(DATE_RE.fullmatch((dob or '').strip()))
+
+
+def _clean_text(value: str, max_len: int) -> str:
+    value = (value or '').strip()
+    return value[:max_len]
+
+
+def username_exists(username: str) -> bool:
+    con = _connect()
+    cur = con.cursor()
+    cur.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+    exists = cur.fetchone() is not None
+    con.close()
+    return exists
+
+
+def get_user_by_username(username: str) -> Optional[sql.Row]:
+    con = _connect()
+    cur = con.cursor()
+    cur.execute('SELECT id, username, dateOfBirth, bio, role FROM users WHERE username = ?', (username,))
+    row = cur.fetchone()
+    con.close()
+    return row
+
+
+def migrate_plaintext_passwords() -> None:
+    con = _connect()
+    cur = con.cursor()
+    rows = cur.execute('SELECT id, password FROM users').fetchall()
+    updated = False
+    for row in rows:
+        password = row['password']
+        if password and not str(password).startswith('scrypt:') and not str(password).startswith('pbkdf2:'):
+            cur.execute('UPDATE users SET password = ? WHERE id = ?', (generate_password_hash(password), row['id']))
+            updated = True
+    if updated:
+        con.commit()
+    con.close()
+
+
+def insertUser(username, password, DoB, bio=''):
+    username = _clean_text(username, 30)
+    bio = _clean_text(bio, 200)
+    DoB = _clean_text(DoB, 10)
+
+    if not _valid_username(username):
+        raise ValueError('Username must be 3-30 characters and contain only letters, numbers, or underscores.')
+    if not _valid_password(password):
+        raise ValueError('Password must be at least 8 characters and include both letters and numbers.')
+    if not _valid_dob(DoB):
+        raise ValueError('Date of birth must use DD/MM/YYYY format.')
+    if username_exists(username):
+        raise ValueError('That username is already taken.')
+
+    con = _connect()
     cur = con.cursor()
     cur.execute(
-        "INSERT INTO users (username, password, dateOfBirth, bio) VALUES (?,?,?,?)",
-        (username, password, DoB, bio),
+        'INSERT INTO users (username, password, dateOfBirth, bio) VALUES (?,?,?,?)',
+        (username, generate_password_hash(password), DoB, bio),
     )
     con.commit()
     con.close()
 
 
 def retrieveUsers(username, password):
-    """
-    Authenticate a user.
-    VULNERABILITY 1 — SQL Injection via f-strings on both username and password.
-      Try: username = admin'--   (bypasses password check entirely)
-      Try: username = ' OR '1'='1'--
-    VULNERABILITY 2 — Timing Side-Channel:
-      sleep() only fires when username EXISTS, leaking valid usernames via response time.
-    VULNERABILITY 3 — No account lockout or rate limiting.
-    """
-    con = sql.connect(DB_PATH)
-    cur = con.cursor()
+    username = _clean_text(username, 30)
+    password = password or ''
+    if not _valid_username(username):
+        return False
 
-    # VULNERABILITY: SQL Injection
-    cur.execute(f"SELECT * FROM users WHERE username = '{username}'")
+    con = _connect()
+    cur = con.cursor()
+    cur.execute('SELECT username, password FROM users WHERE username = ?', (username,))
     user_row = cur.fetchone()
+    con.close()
 
     if user_row is None:
-        con.close()
-        return False  # Fast path — no sleep here (timing leak)
-    else:
-        # VULNERABILITY: Timing side-channel — delay ONLY when username found
-        time.sleep(random.randint(80, 90) / 1000)
+        return False
 
-        try:
-            with open(LOG_PATH, "r") as f:
-                count = int(f.read().strip() or 0)
-            with open(LOG_PATH, "w") as f:
-                f.write(str(count + 1))
-        except Exception:
-            pass
+    try:
+        with open(LOG_PATH, 'r') as f:
+            count = int(f.read().strip() or 0)
+        with open(LOG_PATH, 'w') as f:
+            f.write(str(count + 1))
+    except Exception:
+        pass
 
-        # VULNERABILITY: SQL Injection on password field
-        cur.execute(f"SELECT * FROM users WHERE password = '{password}'")
-        result = cur.fetchone()
-        con.close()
-        return result is not None
+    stored_password = user_row['password']
+    if stored_password.startswith('scrypt:') or stored_password.startswith('pbkdf2:'):
+        return check_password_hash(stored_password, password)
+    return stored_password == password
 
 
 def insertPost(author, content):
-    """
-    Insert a post.
-    VULNERABILITY: SQL Injection via f-string on both author and content.
-    VULNERABILITY: author comes from a hidden HTML field — easily spoofed (IDOR).
-    """
-    con = sql.connect(DB_PATH)
+    author = _clean_text(author, 30)
+    content = _clean_text(content, 500)
+    if not _valid_username(author):
+        raise ValueError('Invalid author.')
+    if not content:
+        raise ValueError('Post content cannot be empty.')
+
+    con = _connect()
     cur = con.cursor()
-    cur.execute(f"INSERT INTO posts (author, content) VALUES ('{author}', '{content}')")
+    cur.execute('INSERT INTO posts (author, content) VALUES (?, ?)', (author, content))
     con.commit()
     con.close()
 
 
 def getPosts():
-    """
-    Get all posts newest-first.
-    NOTE: Content returned here is rendered with |safe in feed.html — stored XSS.
-    """
-    con = sql.connect(DB_PATH)
+    con = _connect()
     cur = con.cursor()
-    data = cur.execute("SELECT * FROM posts ORDER BY id DESC").fetchall()
+    data = cur.execute('SELECT * FROM posts ORDER BY id DESC').fetchall()
     con.close()
     return data
 
 
 def getUserProfile(username):
-    """
-    Get a user profile row.
-    VULNERABILITY: SQL Injection via f-string — try /profile?user=admin'--
-    VULNERABILITY: No authentication check — any visitor can view any profile.
-    """
-    con = sql.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute(f"SELECT id, username, dateOfBirth, bio, role FROM users WHERE username = '{username}'")
-    row = cur.fetchone()
-    con.close()
-    return row
+    username = _clean_text(username, 30)
+    if not _valid_username(username):
+        return None
+    return get_user_by_username(username)
 
 
 def getMessages(username):
-    """
-    Get inbox for a user.
-    VULNERABILITY: SQL Injection via f-string.
-    VULNERABILITY: No auth check — change ?user= to read anyone's inbox.
-    """
-    con = sql.connect(DB_PATH)
+    username = _clean_text(username, 30)
+    if not _valid_username(username):
+        return []
+    con = _connect()
     cur = con.cursor()
-    cur.execute(f"SELECT * FROM messages WHERE recipient = '{username}' ORDER BY id DESC")
+    cur.execute('SELECT * FROM messages WHERE recipient = ? ORDER BY id DESC', (username,))
     rows = cur.fetchall()
     con.close()
     return rows
 
 
 def sendMessage(sender, recipient, body):
-    """
-    Send a DM.
-    VULNERABILITY: SQL Injection on all three fields.
-    VULNERABILITY: sender taken from hidden form field — can be spoofed.
-    """
-    con = sql.connect(DB_PATH)
+    sender = _clean_text(sender, 30)
+    recipient = _clean_text(recipient, 30)
+    body = _clean_text(body, 1000)
+
+    if not _valid_username(sender) or not _valid_username(recipient):
+        raise ValueError('Invalid sender or recipient username.')
+    if not username_exists(recipient):
+        raise ValueError('Recipient does not exist.')
+    if not body:
+        raise ValueError('Message body cannot be empty.')
+
+    con = _connect()
     cur = con.cursor()
-    cur.execute(f"INSERT INTO messages (sender, recipient, body) VALUES ('{sender}', '{recipient}', '{body}')")
+    cur.execute('INSERT INTO messages (sender, recipient, body) VALUES (?, ?, ?)', (sender, recipient, body))
     con.commit()
     con.close()
 
 
 def getVisitorCount():
-    """Return login attempt count."""
     try:
-        with open(LOG_PATH, "r") as f:
+        with open(LOG_PATH, 'r') as f:
             return int(f.read().strip() or 0)
     except Exception:
         return 0
+
