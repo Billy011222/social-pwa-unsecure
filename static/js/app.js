@@ -52,7 +52,9 @@ window.addEventListener('message', function (event) {
     typeof event.data.url === 'string' &&
     isSafeInternalPath(event.data.url)
   ) {
-    window.location.href = event.data.url;
+if (event.data && event.data.action === 'redirect' && isSafeInternalPath(event.data.url)) {
+  window.location.href = event.data.url;
+}
   }
 
   if (
