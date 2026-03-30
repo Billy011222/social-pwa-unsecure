@@ -1,21 +1,8 @@
-// ─────────────────────────────────────────────────────────────────────────────
-//  app.js  —  Unsecure Social PWA  —  Frontend JavaScript
-//
-//  INTENTIONAL VULNERABILITIES (for educational use):
-//    1. DOM-based XSS       — msg parameter injected via innerHTML (no sanitisation)
-//    2. Aggressive push     — requests notification permission immediately on load
-//    3. Hardcoded VAPID key — visible to any student who views page source
-//    4. No CSRF protection  — fetch() calls include no CSRF token
-//    5. Insecure postMessage — message origin is never validated
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── Service Worker Registration ───────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () {
     navigator.serviceWorker.register('/static/js/serviceWorker.js')
       .then(function (reg) {
         console.log('[App] ServiceWorker registered. Scope:', reg.scope);
-        // Automatically check for SW updates on every page load
         reg.update();
       })
       .catch(function (err) {
@@ -24,76 +11,26 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// ── Push Notification Subscription ───────────────────────────────────────────
-// VULNERABILITY: Notification permission is requested immediately on page load
-// without any user-initiated action — bad practice and against browser guidelines
-window.addEventListener('load', function () {
-  if ('Notification' in window && 'serviceWorker' in navigator) {
-    Notification.requestPermission().then(function (permission) {
-      console.log('[App] Notification permission:', permission);
-      if (permission === 'granted') {
-        subscribeToPush();
-      }
-    });
-  }
-});
-
-async function subscribeToPush() {
-  try {
-    const registration = await navigator.serviceWorker.ready;
-
-    // VULNERABILITY: Hardcoded VAPID public key in client-side JavaScript
-    // Anyone reading the source can use this key to send push messages to all subscribers
-    const applicationServerKey = urlBase64ToUint8Array(
-      'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U'
-    );
-
-    const subscription = await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: applicationServerKey
-    });
-
-    // VULNERABILITY: Push subscription POSTed to server with no CSRF token
-    // An attacker who tricks the user into visiting a page can trigger this fetch
-    await fetch('/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(subscription)
-    });
-
-    console.log('[App] Push subscription registered.');
-  } catch (err) {
-    console.warn('[App] Push subscription failed (expected if no VAPID server):', err);
-  }
+function getCsrfToken() {
+  const meta = document.querySelector('meta[name="csrf-token"]');
+  return meta ? meta.getAttribute('content') : '';
 }
 
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-  const base64  = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  const output  = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; i++) {
-    output[i] = rawData.charCodeAt(i);
-  }
-  return output;
+function isSafeInternalPath(url) {
+  if (typeof url !== 'string') return false;
+  return url.startsWith('/') && !url.startsWith('//');
 }
 
-// ── DOM-based XSS ─────────────────────────────────────────────────────────────
-// VULNERABILITY: Reads 'msg' from the URL query string and injects it via innerHTML
-// A crafted link like /?msg=<img src=x onerror=alert(1)> will execute JavaScript
-// This is separate from the server-side reflected XSS in index.html (double vuln)
 window.addEventListener('DOMContentLoaded', function () {
-  const params  = new URLSearchParams(window.location.search);
-  const msg     = params.get('msg');
-  const msgBox  = document.getElementById('js-msg-box');
+  const params = new URLSearchParams(window.location.search);
+  const msg = params.get('msg');
+  const msgBox = document.getElementById('js-msg-box');
 
   if (msg && msgBox) {
-    // VULNERABILITY: innerHTML allows arbitrary HTML/JS execution from URL param
-    // Secure fix: use textContent instead
-    msgBox.innerHTML = msg;
+    msgBox.textContent = msg;
+    msgBox.style.display = 'block';
   }
 
-  // ── Highlight active nav link ──────────────────────────────────────────────
   const currentPath = window.location.pathname;
   document.querySelectorAll('.nav-links a').forEach(function (link) {
     if (link.getAttribute('href') === currentPath) {
@@ -103,28 +40,24 @@ window.addEventListener('DOMContentLoaded', function () {
   });
 });
 
-// ── Insecure postMessage Listener ─────────────────────────────────────────────
-// VULNERABILITY: Listens for postMessage events from ANY origin (no origin check)
-// An iframe on a malicious page can send messages that trigger actions here
 window.addEventListener('message', function (event) {
-  // VULNERABILITY: No check on event.origin — accepts messages from any domain
-  console.log('[App] postMessage received from:', event.origin, 'data:', event.data);
+  if (event.origin !== window.location.origin) {
+    return;
+  }
 
-  if (event.data && event.data.action === 'redirect') {
-    // VULNERABILITY: Redirects to attacker-supplied URL with no validation
+  if (event.data && event.data.action === 'redirect' && isSafeInternalPath(event.data.url)) {
     window.location.href = event.data.url;
   }
 
   if (event.data && event.data.action === 'setMsg') {
     const msgBox = document.getElementById('js-msg-box');
-    if (msgBox) {
-      // VULNERABILITY: innerHTML again — cross-origin XSS via postMessage
-      msgBox.innerHTML = event.data.content;
+    if (msgBox && typeof event.data.content === 'string') {
+      msgBox.textContent = event.data.content;
+      msgBox.style.display = 'block';
     }
   }
 });
 
-// ── PWA Install Prompt ────────────────────────────────────────────────────────
 let deferredPrompt;
 window.addEventListener('beforeinstallprompt', function (e) {
   e.preventDefault();
@@ -140,6 +73,13 @@ window.addEventListener('beforeinstallprompt', function (e) {
         deferredPrompt = null;
         installBtn.style.display = 'none';
       });
-    });
+    }, { once: true });
+  }
+});
+
+window.socialPwaSecurity = {
+  getCsrfToken,
+  isSafeInternalPath,
+};
   }
 });
