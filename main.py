@@ -1,38 +1,21 @@
-import os
-import secrets
+from flask import Flask, render_template, request, redirect, session
 from urllib.parse import urlparse
 
-from flask import Flask, render_template, request, redirect, session, url_for
-
 app = Flask(__name__)
-
-
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
-
-
-def is_safe_url(target):
-    if not target:
-        return False
-
-    parsed = urlparse(target)
-
-    return (
-        parsed.scheme == "" and
-        parsed.netloc == "" and
-        target.startswith("/") and
-        not target.startswith("//")
-    )
+app.secret_key = "supersecretkey"
 
 
 @app.route("/", methods=["GET", "POST"])
 @app.route("/index.html", methods=["GET", "POST"])
 def home():
 
-
     if request.method == "GET" and request.args.get("url"):
-        url = request.args.get("url")
+        url = request.args.get("url", "")
+        url = url.replace("\\", "")
 
-        if is_safe_url(url):
+        parsed = urlparse(url)
+
+        if not parsed.netloc and not parsed.scheme and url.startswith("/"):
             return redirect(url)
 
         return redirect("/")
@@ -40,7 +23,6 @@ def home():
     if request.method == "GET":
         msg = request.args.get("msg", "")
         return render_template("index.html", msg=msg)
-
 
     username = request.form.get("username")
     password = request.form.get("password")
@@ -52,21 +34,16 @@ def home():
     return render_template("index.html", msg="Invalid credentials")
 
 
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/")
-
-
-
 @app.route("/signup.html", methods=["GET", "POST"])
 def signup():
 
-
     if request.method == "GET" and request.args.get("url"):
-        url = request.args.get("url")
+        url = request.args.get("url", "")
+        url = url.replace("\\", "")
 
-        if is_safe_url(url):
+        parsed = urlparse(url)
+
+        if not parsed.netloc and not parsed.scheme and url.startswith("/"):
             return redirect(url)
 
         return redirect("/signup.html")
@@ -83,11 +60,13 @@ def feed():
     if "username" not in session:
         return redirect("/")
 
-
     if request.method == "GET" and request.args.get("url"):
-        url = request.args.get("url")
+        url = request.args.get("url", "")
+        url = url.replace("\\", "")
 
-        if is_safe_url(url):
+        parsed = urlparse(url)
+
+        if not parsed.netloc and not parsed.scheme and url.startswith("/"):
             return redirect(url)
 
         return redirect("/feed.html")
@@ -101,11 +80,13 @@ def profile():
     if "username" not in session:
         return redirect("/")
 
-
     if request.args.get("url"):
-        url = request.args.get("url")
+        url = request.args.get("url", "")
+        url = url.replace("\\", "")
 
-        if is_safe_url(url):
+        parsed = urlparse(url)
+
+        if not parsed.netloc and not parsed.scheme and url.startswith("/"):
             return redirect(url)
 
         return redirect("/profile")
@@ -120,6 +101,12 @@ def messages():
         return redirect("/")
 
     return render_template("messages.html", username=session["username"], messages=[])
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
 
 
 if __name__ == "__main__":
